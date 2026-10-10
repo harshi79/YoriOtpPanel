@@ -2,7 +2,7 @@ import "server-only";
 import { and, desc, eq, getTableColumns, gt, isNull, lte, sql } from "drizzle-orm";
 import { activeNumberLeases, databaseNowMs, mailboxOwnership, mailboxes, numberSessions } from "@/db/schema";
 import { AppError } from "@/lib/errors";
-import { getDb, isUniqueConstraintError, mapDatabaseError, withDatabaseErrors, type DatabaseTransaction } from "@/lib/db";
+import { getDb, isUniqueConstraintError, withDatabaseErrors, type DatabaseTransaction } from "@/lib/db";
 import { normalizePhone } from "@/lib/provider/normalize";
 import type { MailboxSummary, ProviderNumberAllocation } from "@/lib/provider/types";
 
@@ -66,31 +66,33 @@ export async function createNumberOwnership(userId: string, allocation: Provider
     throw new AppError(502, "provider_contract_error", "The provider returned an invalid or stale assignment timestamp.");
   }
   const expiresAt = new Date(assignedAtMs + 20 * 60 * 1000);
-  try {
-    return await getDb().transaction(async (tx) => {
-      await expireNumberLeases(tx);
-      const [session] = await tx.insert(numberSessions).values({
-        clerk_user_id: userId,
-        number: allocation.number,
-        number_key: numberKey,
-        service: allocation.service ?? "Unknown",
-        country: allocation.country ?? null,
-        flag: allocation.flag ?? null,
-        network: allocation.network ?? null,
-        assigned_at: assignedAt,
-        expires_at: expiresAt,
-      }).returning();
-      await tx.insert(activeNumberLeases).values({
-        number_key: numberKey, session_id: session.id, clerk_user_id: userId, expires_at: expiresAt,
+  return withDatabaseErrors(async () => {
+    try {
+      return await getDb().transaction(async (tx) => {
+        await expireNumberLeases(tx);
+        const [session] = await tx.insert(numberSessions).values({
+          clerk_user_id: userId,
+          number: allocation.number,
+          number_key: numberKey,
+          service: allocation.service ?? "Unknown",
+          country: allocation.country ?? null,
+          flag: allocation.flag ?? null,
+          network: allocation.network ?? null,
+          assigned_at: assignedAt,
+          expires_at: expiresAt,
+        }).returning();
+        await tx.insert(activeNumberLeases).values({
+          number_key: numberKey, session_id: session.id, clerk_user_id: userId, expires_at: expiresAt,
+        });
+        return session;
       });
-      return session;
-    });
-  } catch (error) {
-    if (isUniqueConstraintError(error)) {
-      throw new AppError(409, "provider_number_already_leased", "NumberPanel returned a number already assigned in YoriOTP. It was not shown to this account; contact the owner if the issue persists.");
+    } catch (error) {
+      if (isUniqueConstraintError(error)) {
+        throw new AppError(409, "provider_number_already_leased", "NumberPanel returned a number already assigned in YoriOTP. It was not shown to this account; contact the owner if the issue persists.");
+      }
+      throw error;
     }
-    throw mapDatabaseError(error);
-  }
+  });
 }
 
 export async function finishNumberOwnership(
@@ -135,23 +137,25 @@ export async function createMailboxOwnership(userId: string, email: string, doma
   if (!/^.{1,128}@[^\s@]{1,255}$/.test(emailKey)) {
     throw new AppError(502, "provider_contract_error", "The provider returned an invalid email address.");
   }
-  try {
-    return await getDb().transaction(async (tx) => {
-      const [mailbox] = await tx.insert(mailboxes).values({
-        clerk_user_id: userId, email: email.trim(), email_key: emailKey,
-        domain: domain || emailKey.split("@").at(-1) || null,
-      }).returning();
-      await tx.insert(mailboxOwnership).values({
-        email_key: emailKey, provider_email: email.trim(), mailbox_id: mailbox.id, clerk_user_id: userId,
+  return withDatabaseErrors(async () => {
+    try {
+      return await getDb().transaction(async (tx) => {
+        const [mailbox] = await tx.insert(mailboxes).values({
+          clerk_user_id: userId, email: email.trim(), email_key: emailKey,
+          domain: domain || emailKey.split("@").at(-1) || null,
+        }).returning();
+        await tx.insert(mailboxOwnership).values({
+          email_key: emailKey, provider_email: email.trim(), mailbox_id: mailbox.id, clerk_user_id: userId,
+        });
+        return mailbox;
       });
-      return mailbox;
-    });
-  } catch (error) {
-    if (isUniqueConstraintError(error)) {
-      throw new AppError(409, "provider_mailbox_already_owned", "The provider returned an address already registered in YoriOTP. It was not shown to this account.");
+    } catch (error) {
+      if (isUniqueConstraintError(error)) {
+        throw new AppError(409, "provider_mailbox_already_owned", "The provider returned an address already registered in YoriOTP. It was not shown to this account.");
+      }
+      throw error;
     }
-    throw mapDatabaseError(error);
-  }
+  });
 }
 
 export async function getOwnedMailbox(userId: string, mailboxId: string): Promise<MailboxRecord> {

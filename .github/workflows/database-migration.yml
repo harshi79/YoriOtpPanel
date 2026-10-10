@@ -21,6 +21,9 @@ jobs:
       - run: npm run lint
       - run: npm run typecheck
       - run: npm run db:check
+      # db/embedded-migrations.ts is what the deployed app applies by itself, so it
+      # must match the committed drizzle migrations (regenerate with `npm run db:embed`).
+      - run: npm run db:embed:check
       - run: npm test
       - run: npm run build
         env:
