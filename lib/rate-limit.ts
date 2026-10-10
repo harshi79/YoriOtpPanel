@@ -2,7 +2,7 @@ import "server-only";
 import { createHash } from "node:crypto";
 import { sql } from "drizzle-orm";
 import { appRateLimits, databaseNowMs } from "@/db/schema";
-import { getDb } from "@/lib/db";
+import { getDb, withDatabaseErrors } from "@/lib/db";
 import { AppError } from "@/lib/errors";
 
 const LIMITS = {
@@ -27,7 +27,9 @@ export async function enforceRateLimit(userId: string, action: string): Promise<
   const rule = LIMITS[key];
   const digest = createHash("sha256").update(`${userId}:${key}`).digest("hex");
   const bucket = `${key}:${digest}`;
-  const [row] = await getDb().insert(appRateLimits).values({
+  // The only fallible I/O below is the database write, so a driver failure is
+  // reported as 503 with setup guidance instead of a generic 500.
+  const [row] = await withDatabaseErrors(() => getDb().insert(appRateLimits).values({
     bucket, window_start: databaseNowMs, request_count: 1,
   }).onConflictDoUpdate({
     target: appRateLimits.bucket,
@@ -39,11 +41,36 @@ export async function enforceRateLimit(userId: string, action: string): Promise<
         when ${appRateLimits.window_start} <= ${databaseNowMs} - ${rule.seconds * 1000} then ${databaseNowMs}
         else ${appRateLimits.window_start} end`,
     },
-  }).returning();
+  }).returning());
   const count = Number(row.request_count);
   if (count > rule.max) {
     const resetAt = new Date(row.window_start).getTime() + rule.seconds * 1000;
     const retryAfter = Math.max(1, Math.ceil((resetAt - Date.now()) / 1000));
+    throw new AppError(429, "app_rate_limited", "Too many requests. Please wait briefly and try again.", retryAfter);
+  }
+}
+
+// Best-effort per-instance throttle for diagnostics routes (health, settings)
+// that must stay available when the database itself is down. It is intentionally
+// separate from the durable database-backed limits above.
+const memoryBuckets = new Map<string, { windowStart: number; count: number }>();
+
+export function enforceMemoryRateLimit(bucket: string, max = 60, seconds = 60): void {
+  const now = Date.now();
+  const windowMs = Math.max(1000, seconds * 1000);
+  const entry = memoryBuckets.get(bucket);
+  if (!entry || entry.windowStart + windowMs <= now) {
+    memoryBuckets.set(bucket, { windowStart: now, count: 1 });
+    if (memoryBuckets.size > 5000) {
+      for (const [key, value] of memoryBuckets) {
+        if (value.windowStart + windowMs <= now) memoryBuckets.delete(key);
+      }
+    }
+    return;
+  }
+  entry.count += 1;
+  if (entry.count > max) {
+    const retryAfter = Math.max(1, Math.ceil((entry.windowStart + windowMs - now) / 1000));
     throw new AppError(429, "app_rate_limited", "Too many requests. Please wait briefly and try again.", retryAfter);
   }
 }

@@ -1,11 +1,11 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import { Check, CircleHelp, KeyRound, LockKeyhole, RefreshCw, ShieldCheck, type LucideIcon } from "lucide-react";
+import { Check, CircleHelp, Database, KeyRound, LockKeyhole, RefreshCw, ShieldCheck, TableProperties, type LucideIcon } from "lucide-react";
 import { clientApi, messageFor } from "@/lib/client-api";
 import { ErrorNotice, LoadingCard, PageHeading, SectionCard, StatusMessage } from "@/components/dashboard/ui";
 
-type Settings = { providerConfigured: boolean; databaseConfigured: boolean; googleOAuthOnlyUi: boolean; owner: boolean; providerDataScope: string };
+type Settings = { providerConfigured: boolean; databaseConfigured: boolean; databaseReachable: boolean; tablesInitialized: boolean; googleOAuthOnlyUi: boolean; owner: boolean; providerDataScope: string };
 
 export function SettingsPanel() {
   const [settings, setSettings] = useState<Settings | null>(null);
@@ -25,15 +25,25 @@ export function SettingsPanel() {
     return () => window.clearTimeout(timer);
   }, [fetchSettings]);
 
+  const setupIssue = !settings ? null
+    : !settings.providerConfigured ? "Set NUMBERPANEL_API_KEY as a server-side secret on this deployment, then redeploy."
+    : !settings.databaseConfigured ? "Set TURSO_DATABASE_URL and TURSO_AUTH_TOKEN on this deployment, then redeploy."
+    : !settings.databaseReachable ? "The Turso database could not be reached. Verify TURSO_DATABASE_URL and TURSO_AUTH_TOKEN, then redeploy."
+    : !settings.tablesInitialized ? "The database is reachable but its tables are missing. Run `npm run db:setup` with this deployment's Turso credentials."
+    : null;
+
   return (
     <div className="mx-auto max-w-[1120px]">
       <PageHeading eyebrow="Preferences & security" title="Settings" description="Credential state and provider scope are shown without returning secrets to the browser." action={<button className="btn-secondary min-h-10" onClick={() => void load()}><RefreshCw size={15} /> Refresh</button>} />
       {error && <div className="mb-4"><ErrorNotice message={error} onRetry={() => void load()} /></div>}
+      {settings && setupIssue && <div className="mb-4"><ErrorNotice message={`Setup required: ${setupIssue}`} /></div>}
       <div className="grid gap-4 lg:grid-cols-[1fr_.85fr]">
         <SectionCard title="Connection status" description="Only configuration status is exposed to your signed-in browser.">
-          {loading && !settings ? <LoadingCard rows={4} /> : settings ? <div className="space-y-3">
+          {loading && !settings ? <LoadingCard rows={6} /> : settings ? <div className="space-y-3">
             <StatusRow icon={KeyRound} label="NumberPanel API key" value={settings.providerConfigured ? "Configured on server" : "Not configured"} ok={settings.providerConfigured} />
             <StatusRow icon={LockKeyhole} label="Ownership database" value={settings.databaseConfigured ? "Configured" : "Not configured"} ok={settings.databaseConfigured} />
+            <StatusRow icon={Database} label="Database reachable" value={settings.databaseReachable ? "Reachable" : "Unreachable"} ok={settings.databaseReachable} />
+            <StatusRow icon={TableProperties} label="Database tables" value={settings.tablesInitialized ? "Initialized" : "Missing — run db:setup"} ok={settings.tablesInitialized} />
             <StatusRow icon={ShieldCheck} label="Sign-in interface" value={settings.googleOAuthOnlyUi ? "Google OAuth only" : "Check app configuration"} ok={settings.googleOAuthOnlyUi} />
             <StatusRow icon={Check} label="Application owner" value={settings.owner ? "Owner account" : "Standard account"} ok={settings.owner} />
           </div> : <StatusMessage>Connection status is not available.</StatusMessage>}
