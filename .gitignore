@@ -1,0 +1,23 @@
+# dependencies and builds
+node_modules/
+.next/
+out/
+dist/
+coverage/
+*.tsbuildinfo
+
+# local environment and secrets
+.env
+.env.*
+!.env.example
+!.env.local.example
+
+# editor / OS
+.DS_Store
+*.log
+.vscode/
+.idea/
+
+# test / tool caches
+.turbo/
+.vercel/
