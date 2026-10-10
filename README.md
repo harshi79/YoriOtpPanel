@@ -171,3 +171,17 @@ Source export execution and live hosted Turso verification require operator acce
 ## Deployment
 
 Deploy as a Node.js Next.js application (not static export). Provide Node 22, a durable Turso database, all required Clerk/provider/owner secrets, and run `npm run db:setup` once per database before serving traffic. Then build and start with `npm run build` and `npm start`, or use a Next.js-compatible managed platform. Set Clerk's production origin and Google OAuth connection in Clerk Dashboard. Keep `.env.local` untracked for local development and use deployment secret storage in production.
+
+### Vercel checklist (read this if the dashboard loads but numbers/mail show errors)
+
+Sign-in and page shells work without backend secrets, so a successful deploy with failing `/api/provider/*` calls almost always means the deployment's own secrets or database tables are missing — not a code problem. Every provider API call runs through the Turso ownership database first, so one missing step breaks numbers, mail, history, and sessions together.
+
+1. In Vercel Dashboard → Project → Settings → Environment Variables, set for the **Production** environment: `NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY`, `CLERK_SECRET_KEY` (use **production** Clerk keys — development keys log a telemetry warning and keep Google OAuth in dev mode), `NUMBERPANEL_API_KEY`, `TURSO_DATABASE_URL`, `TURSO_AUTH_TOKEN`, and `OWNER_CLERK_USER_ID`. Redeploy after changing them.
+2. Create the ownership tables in the **same Turso database** the deployment points to. From your machine with the production values exported (never commit them):
+   ```bash
+   TURSO_DATABASE_URL='libsql://…' TURSO_AUTH_TOKEN='…' npm run db:setup
+   ```
+   `db:setup` is safe to rerun. Skipping this step is the most common cause of `503 database_not_initialized` on every provider endpoint.
+3. Open `https://<your-app>.vercel.app/api/health` (no sign-in needed). Every check should be `true` and `status` should be `"ok"`; `nextSteps` names anything still missing.
+4. Sign in and open Dashboard → Settings, which repeats the same checks for the signed-in session.
+5. If errors persist, open Vercel Dashboard → Logs and look for the JSON `{"level":"error",...}` lines: they carry the exact `code` (`database_not_initialized`, `database_unavailable`, `provider_not_configured`, `provider_unauthorized`, …) and the failing reason.
