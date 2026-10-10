@@ -1,82 +1,52 @@
 import "server-only";
+import { and, desc, eq, getTableColumns, gt, isNull, lte, sql } from "drizzle-orm";
+import { activeNumberLeases, databaseNowMs, mailboxOwnership, mailboxes, numberSessions } from "@/db/schema";
 import { AppError } from "@/lib/errors";
-import { getDb } from "@/lib/db";
+import { getDb, isUniqueConstraintError, type DatabaseTransaction } from "@/lib/db";
 import { normalizePhone } from "@/lib/provider/normalize";
 import type { MailboxSummary, ProviderNumberAllocation } from "@/lib/provider/types";
 
-export interface NumberSessionRecord {
-  id: string;
-  clerk_user_id: string;
-  number: string;
-  number_key: string;
-  service: string;
-  country: string | null;
-  flag: string | null;
-  network: string | null;
-  assigned_at: Date;
-  expires_at: Date;
-  released_at: Date | null;
-  end_reason: string | null;
-  created_at: Date;
-}
+export type NumberSessionRecord = typeof numberSessions.$inferSelect;
+export type MailboxRecord = typeof mailboxes.$inferSelect;
 
-export interface MailboxRecord {
-  id: string;
-  clerk_user_id: string;
-  email: string;
-  email_key: string;
-  domain: string | null;
-  created_at: Date;
+async function expireNumberLeases(tx: DatabaseTransaction): Promise<void> {
+  const [{ now }] = await tx.all<{ now: number }>(sql`select ${databaseNowMs} as now`);
+  const cutoff = new Date(now);
+  await tx.update(numberSessions).set({
+    released_at: sql`coalesce(${numberSessions.released_at}, ${numberSessions.expires_at})`,
+    end_reason: "expired",
+  }).where(and(isNull(numberSessions.released_at), lte(numberSessions.expires_at, cutoff)));
+  await tx.delete(activeNumberLeases).where(lte(activeNumberLeases.expires_at, cutoff));
 }
 
 export async function expireStaleNumberLeases(): Promise<void> {
-  const sql = getDb();
-  await sql.begin(async (tx) => {
-    await tx`
-      UPDATE number_sessions
-      SET released_at = COALESCE(released_at, expires_at), end_reason = 'expired'
-      WHERE released_at IS NULL AND expires_at <= now()
-    `;
-    await tx`DELETE FROM active_number_leases WHERE expires_at <= now()`;
-  });
+  await getDb().transaction(expireNumberLeases);
 }
 
 export async function listOwnedActiveNumbers(userId: string): Promise<NumberSessionRecord[]> {
   await expireStaleNumberLeases();
-  const sql = getDb();
-  return sql<NumberSessionRecord[]>`
-    SELECT s.*
-    FROM number_sessions AS s
-    INNER JOIN active_number_leases AS l ON l.session_id = s.id
-    WHERE l.clerk_user_id = ${userId} AND l.expires_at > now()
-    ORDER BY s.created_at DESC
-  `;
+  return getDb().select(getTableColumns(numberSessions)).from(numberSessions)
+    .innerJoin(activeNumberLeases, eq(activeNumberLeases.session_id, numberSessions.id))
+    .where(and(eq(activeNumberLeases.clerk_user_id, userId), gt(activeNumberLeases.expires_at, databaseNowMs)))
+    .orderBy(desc(numberSessions.created_at));
 }
 
 export async function listOwnedNumberHistory(userId: string, limit = 200): Promise<NumberSessionRecord[]> {
   await expireStaleNumberLeases();
   const safeLimit = Math.min(Math.max(Math.floor(limit), 1), 200);
-  const sql = getDb();
-  return sql<NumberSessionRecord[]>`
-    SELECT * FROM number_sessions
-    WHERE clerk_user_id = ${userId}
-    ORDER BY created_at DESC
-    LIMIT ${safeLimit}
-  `;
+  return getDb().select().from(numberSessions).where(eq(numberSessions.clerk_user_id, userId))
+    .orderBy(desc(numberSessions.created_at)).limit(safeLimit);
 }
 
 export async function getOwnedActiveNumber(userId: string, sessionId: string): Promise<NumberSessionRecord> {
   await expireStaleNumberLeases();
-  const sql = getDb();
-  const [row] = await sql<NumberSessionRecord[]>`
-    SELECT s.*
-    FROM number_sessions AS s
-    INNER JOIN active_number_leases AS l ON l.session_id = s.id
-    WHERE s.id = ${sessionId}::uuid
-      AND l.clerk_user_id = ${userId}
-      AND l.expires_at > now()
-    LIMIT 1
-  `;
+  const [row] = await getDb().select(getTableColumns(numberSessions)).from(numberSessions)
+    .innerJoin(activeNumberLeases, eq(activeNumberLeases.session_id, numberSessions.id))
+    .where(and(
+      eq(numberSessions.id, sessionId.toLowerCase()),
+      eq(activeNumberLeases.clerk_user_id, userId),
+      gt(activeNumberLeases.expires_at, databaseNowMs),
+    )).limit(1);
   if (!row) throw new AppError(404, "resource_not_found", "The requested active number was not found.");
   return row;
 }
@@ -90,32 +60,27 @@ export async function createNumberOwnership(userId: string, allocation: Provider
     throw new AppError(502, "provider_contract_error", "The provider returned an invalid or stale assignment timestamp.");
   }
   const expiresAt = new Date(assignedAtMs + 20 * 60 * 1000);
-  const sql = getDb();
   try {
-    return await sql.begin(async (tx) => {
-      await tx`
-        UPDATE number_sessions
-        SET released_at = COALESCE(released_at, expires_at), end_reason = 'expired'
-        WHERE released_at IS NULL AND expires_at <= now()
-      `;
-      await tx`DELETE FROM active_number_leases WHERE expires_at <= now()`;
-      const [session] = await tx<NumberSessionRecord[]>`
-        INSERT INTO number_sessions
-          (clerk_user_id, number, number_key, service, country, flag, network, assigned_at, expires_at)
-        VALUES
-          (${userId}, ${allocation.number}, ${numberKey}, ${allocation.service ?? "Unknown"},
-           ${allocation.country ?? null}, ${allocation.flag ?? null}, ${allocation.network ?? null},
-           ${assignedAt}, ${expiresAt})
-        RETURNING *
-      `;
-      await tx`
-        INSERT INTO active_number_leases (number_key, session_id, clerk_user_id, expires_at)
-        VALUES (${numberKey}, ${session.id}::uuid, ${userId}, ${expiresAt})
-      `;
+    return await getDb().transaction(async (tx) => {
+      await expireNumberLeases(tx);
+      const [session] = await tx.insert(numberSessions).values({
+        clerk_user_id: userId,
+        number: allocation.number,
+        number_key: numberKey,
+        service: allocation.service ?? "Unknown",
+        country: allocation.country ?? null,
+        flag: allocation.flag ?? null,
+        network: allocation.network ?? null,
+        assigned_at: assignedAt,
+        expires_at: expiresAt,
+      }).returning();
+      await tx.insert(activeNumberLeases).values({
+        number_key: numberKey, session_id: session.id, clerk_user_id: userId, expires_at: expiresAt,
+      });
       return session;
     });
   } catch (error) {
-    if (typeof error === "object" && error !== null && "code" in error && error.code === "23505") {
+    if (isUniqueConstraintError(error)) {
       throw new AppError(409, "provider_number_already_leased", "NumberPanel returned a number already assigned in YoriOTP. It was not shown to this account; contact the owner if the issue persists.");
     }
     throw error;
@@ -128,50 +93,35 @@ export async function finishNumberOwnership(
   reason: "released" | "expired",
   endedAt = new Date(),
 ): Promise<void> {
-  const sql = getDb();
-  const [row] = await sql<{ id: string }[]>`
-    SELECT id FROM active_number_leases
-    WHERE session_id = ${sessionId}::uuid AND clerk_user_id = ${userId}
-    LIMIT 1
-  `;
-  if (!row) throw new AppError(404, "resource_not_found", "The requested active number was not found.");
-  await sql.begin(async (tx) => {
-    await tx`
-      UPDATE number_sessions
-      SET released_at = ${endedAt}, end_reason = ${reason}
-      WHERE id = ${sessionId}::uuid AND clerk_user_id = ${userId}
-    `;
-    await tx`DELETE FROM active_number_leases WHERE session_id = ${sessionId}::uuid AND clerk_user_id = ${userId}`;
+  await getDb().transaction(async (tx) => {
+    // The lease table has session_id, not id. Check ownership in the same write
+    // transaction as the release so the check cannot race another release.
+    const leaseFilter = and(eq(activeNumberLeases.session_id, sessionId.toLowerCase()), eq(activeNumberLeases.clerk_user_id, userId));
+    const [row] = await tx.select({ session_id: activeNumberLeases.session_id }).from(activeNumberLeases).where(leaseFilter).limit(1);
+    if (!row) throw new AppError(404, "resource_not_found", "The requested active number was not found.");
+    await tx.update(numberSessions).set({ released_at: endedAt, end_reason: reason })
+      .where(and(eq(numberSessions.id, sessionId.toLowerCase()), eq(numberSessions.clerk_user_id, userId)));
+    await tx.delete(activeNumberLeases).where(leaseFilter);
   });
 }
 
 export async function capNumberHistoryAt(userId: string, sessionId: string, endedAt: Date): Promise<void> {
   if (!Number.isFinite(endedAt.getTime())) throw new AppError(500, "invalid_lease_end", "The provider assignment timestamp is invalid.");
-  const sql = getDb();
-  await sql.begin(async (tx) => {
-    await tx`
-      UPDATE number_sessions
-      SET released_at = CASE
-            WHEN released_at IS NULL OR released_at > ${endedAt} THEN ${endedAt}
-            ELSE released_at
-          END,
-          end_reason = CASE
-            WHEN released_at IS NULL OR released_at > ${endedAt} THEN 'expired'
-            ELSE end_reason
-          END
-      WHERE id = ${sessionId}::uuid AND clerk_user_id = ${userId}
-    `;
-    await tx`DELETE FROM active_number_leases WHERE session_id = ${sessionId}::uuid AND clerk_user_id = ${userId}`;
+  const endedAtMs = endedAt.getTime();
+  await getDb().transaction(async (tx) => {
+    await tx.update(numberSessions).set({
+      released_at: sql`case when ${numberSessions.released_at} is null or ${numberSessions.released_at} > ${endedAtMs}
+        then ${endedAtMs} else ${numberSessions.released_at} end`,
+      end_reason: sql`case when ${numberSessions.released_at} is null or ${numberSessions.released_at} > ${endedAtMs}
+        then 'expired' else ${numberSessions.end_reason} end`,
+    }).where(and(eq(numberSessions.id, sessionId.toLowerCase()), eq(numberSessions.clerk_user_id, userId)));
+    await tx.delete(activeNumberLeases)
+      .where(and(eq(activeNumberLeases.session_id, sessionId.toLowerCase()), eq(activeNumberLeases.clerk_user_id, userId)));
   });
 }
 
 export async function listOwnedMailboxes(userId: string): Promise<MailboxRecord[]> {
-  const sql = getDb();
-  return sql<MailboxRecord[]>`
-    SELECT * FROM mailboxes
-    WHERE clerk_user_id = ${userId}
-    ORDER BY created_at DESC
-  `;
+  return getDb().select().from(mailboxes).where(eq(mailboxes.clerk_user_id, userId)).orderBy(desc(mailboxes.created_at));
 }
 
 export async function createMailboxOwnership(userId: string, email: string, domain: string): Promise<MailboxRecord> {
@@ -179,22 +129,19 @@ export async function createMailboxOwnership(userId: string, email: string, doma
   if (!/^.{1,128}@[^\s@]{1,255}$/.test(emailKey)) {
     throw new AppError(502, "provider_contract_error", "The provider returned an invalid email address.");
   }
-  const sql = getDb();
   try {
-    return await sql.begin(async (tx) => {
-      const [mailbox] = await tx<MailboxRecord[]>`
-        INSERT INTO mailboxes (clerk_user_id, email, email_key, domain)
-        VALUES (${userId}, ${email.trim()}, ${emailKey}, ${domain || emailKey.split("@").at(-1) || null})
-        RETURNING *
-      `;
-      await tx`
-        INSERT INTO mailbox_ownership (email_key, provider_email, mailbox_id, clerk_user_id)
-        VALUES (${emailKey}, ${email.trim()}, ${mailbox.id}::uuid, ${userId})
-      `;
+    return await getDb().transaction(async (tx) => {
+      const [mailbox] = await tx.insert(mailboxes).values({
+        clerk_user_id: userId, email: email.trim(), email_key: emailKey,
+        domain: domain || emailKey.split("@").at(-1) || null,
+      }).returning();
+      await tx.insert(mailboxOwnership).values({
+        email_key: emailKey, provider_email: email.trim(), mailbox_id: mailbox.id, clerk_user_id: userId,
+      });
       return mailbox;
     });
   } catch (error) {
-    if (typeof error === "object" && error !== null && "code" in error && error.code === "23505") {
+    if (isUniqueConstraintError(error)) {
       throw new AppError(409, "provider_mailbox_already_owned", "The provider returned an address already registered in YoriOTP. It was not shown to this account.");
     }
     throw error;
@@ -202,10 +149,8 @@ export async function createMailboxOwnership(userId: string, email: string, doma
 }
 
 export async function getOwnedMailbox(userId: string, mailboxId: string): Promise<MailboxRecord> {
-  const sql = getDb();
-  const [row] = await sql<MailboxRecord[]>`
-    SELECT * FROM mailboxes WHERE id = ${mailboxId}::uuid AND clerk_user_id = ${userId} LIMIT 1
-  `;
+  const [row] = await getDb().select().from(mailboxes)
+    .where(and(eq(mailboxes.id, mailboxId.toLowerCase()), eq(mailboxes.clerk_user_id, userId))).limit(1);
   if (!row) throw new AppError(404, "resource_not_found", "The requested mailbox was not found.");
   return row;
 }
@@ -226,19 +171,19 @@ export async function getOwnerOverview(): Promise<{
   totalNumbers: number;
   mailboxes: number;
 }> {
-  const sql = getDb();
+  const db = getDb();
   await expireStaleNumberLeases();
-  const [row] = await sql<{ users: number; active_numbers: number; total_numbers: number; mailboxes: number }[]>`
+  const [row] = await db.all<{ users: number; active_numbers: number; total_numbers: number; mailboxes: number }>(sql`
     SELECT
       (SELECT COUNT(DISTINCT clerk_user_id) FROM (
         SELECT clerk_user_id FROM number_sessions
         UNION
         SELECT clerk_user_id FROM mailboxes
       ) AS known_users) AS users,
-      (SELECT COUNT(*) FROM active_number_leases WHERE expires_at > now()) AS active_numbers,
+      (SELECT COUNT(*) FROM active_number_leases WHERE expires_at > ${databaseNowMs}) AS active_numbers,
       (SELECT COUNT(*) FROM number_sessions) AS total_numbers,
       (SELECT COUNT(*) FROM mailboxes) AS mailboxes
-  `;
+  `);
   return {
     users: Number(row.users),
     activeNumbers: Number(row.active_numbers),

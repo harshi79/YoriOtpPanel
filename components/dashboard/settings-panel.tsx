@@ -48,7 +48,7 @@ export function SettingsPanel() {
         <SectionCard title="Credential setup" description="The provider key is never displayed here and cannot be changed from the browser.">
           <ol className="space-y-3 text-xs leading-5 text-[#9aada3]">
             <li className="flex gap-2"><span className="font-mono text-[#8bf0c2]">01</span>Set <code className="rounded bg-white/[0.05] px-1 text-[#c5d8cc]">NUMBERPANEL_API_KEY</code> as a deployment secret or in an untracked local <code className="rounded bg-white/[0.05] px-1 text-[#c5d8cc]">.env.local</code>.</li>
-            <li className="flex gap-2"><span className="font-mono text-[#8bf0c2]">02</span>Set <code className="rounded bg-white/[0.05] px-1 text-[#c5d8cc]">DATABASE_URL</code> to the durable PostgreSQL database used for ownership and throttling.</li>
+            <li className="flex gap-2"><span className="font-mono text-[#8bf0c2]">02</span>Set <code className="rounded bg-white/[0.05] px-1 text-[#c5d8cc]">TURSO_DATABASE_URL</code> and <code className="rounded bg-white/[0.05] px-1 text-[#c5d8cc]">TURSO_AUTH_TOKEN</code> for the durable Turso database used for ownership and throttling.</li>
             <li className="flex gap-2"><span className="font-mono text-[#8bf0c2]">03</span>Run <code className="rounded bg-white/[0.05] px-1 text-[#c5d8cc]">npm run db:setup</code> during deployment or initial setup.</li>
           </ol>
         </SectionCard>

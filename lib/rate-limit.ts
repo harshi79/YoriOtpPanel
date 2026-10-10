@@ -1,5 +1,7 @@
 import "server-only";
 import { createHash } from "node:crypto";
+import { sql } from "drizzle-orm";
+import { appRateLimits, databaseNowMs } from "@/db/schema";
 import { getDb } from "@/lib/db";
 import { AppError } from "@/lib/errors";
 
@@ -25,21 +27,19 @@ export async function enforceRateLimit(userId: string, action: string): Promise<
   const rule = LIMITS[key];
   const digest = createHash("sha256").update(`${userId}:${key}`).digest("hex");
   const bucket = `${key}:${digest}`;
-  const sql = getDb();
-  const [row] = await sql<{ request_count: number; window_start: Date }[]>`
-    INSERT INTO app_rate_limits (bucket, window_start, request_count)
-    VALUES (${bucket}, now(), 1)
-    ON CONFLICT (bucket) DO UPDATE SET
-      request_count = CASE
-        WHEN app_rate_limits.window_start <= now() - (${rule.seconds}::int * interval '1 second') THEN 1
-        ELSE app_rate_limits.request_count + 1
-      END,
-      window_start = CASE
-        WHEN app_rate_limits.window_start <= now() - (${rule.seconds}::int * interval '1 second') THEN now()
-        ELSE app_rate_limits.window_start
-      END
-    RETURNING request_count, window_start
-  `;
+  const [row] = await getDb().insert(appRateLimits).values({
+    bucket, window_start: databaseNowMs, request_count: 1,
+  }).onConflictDoUpdate({
+    target: appRateLimits.bucket,
+    set: {
+      request_count: sql`case
+        when ${appRateLimits.window_start} <= ${databaseNowMs} - ${rule.seconds * 1000} then 1
+        else ${appRateLimits.request_count} + 1 end`,
+      window_start: sql`case
+        when ${appRateLimits.window_start} <= ${databaseNowMs} - ${rule.seconds * 1000} then ${databaseNowMs}
+        else ${appRateLimits.window_start} end`,
+    },
+  }).returning();
   const count = Number(row.request_count);
   if (count > rule.max) {
     const resetAt = new Date(row.window_start).getTime() + rule.seconds * 1000;
