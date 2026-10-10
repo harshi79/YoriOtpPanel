@@ -1,6 +1,6 @@
 import "server-only";
 import { sql } from "drizzle-orm";
-import { getDb, isDatabaseConfigured } from "@/lib/db";
+import { ensureDatabaseSchema, getDb, isDatabaseConfigured } from "@/lib/db";
 
 export const REQUIRED_TABLES = [
   "number_sessions",
@@ -18,9 +18,18 @@ export type DatabaseProbe = {
 
 // Best-effort readiness probe for diagnostics routes. It never throws: any
 // failure is reported as unreachable/uninitialized booleans instead.
+//
+// It is also self-healing: pending migrations are applied first, so a freshly
+// provisioned Turso database creates its own tables and this probe reports
+// initialized without anyone running `npm run db:setup`.
 export async function probeDatabase(): Promise<DatabaseProbe> {
   if (!isDatabaseConfigured()) {
     return { configured: false, reachable: false, initialized: false };
+  }
+  try {
+    await ensureDatabaseSchema();
+  } catch {
+    // Reported as reachable:false / initialized:false by the probe below.
   }
   try {
     const tables = await getDb().all<{ name: string }>(

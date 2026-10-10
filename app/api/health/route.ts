@@ -8,7 +8,8 @@ export const dynamic = "force-dynamic";
 
 // Public readiness endpoint. It reports configuration booleans only (never
 // secrets) and stays available when the database is down, so a broken setup
-// can be diagnosed from the live deployment itself.
+// can be diagnosed from the live deployment itself. Probing also applies any
+// pending migrations, so a fresh Turso database creates its own tables here.
 export async function GET(request: Request) {
   try {
     const forwardedFor = request.headers.get("x-forwarded-for")?.split(",")[0]?.trim();
@@ -32,7 +33,7 @@ export async function GET(request: Request) {
     } else if (!database.reachable) {
       nextSteps.push("The Turso database could not be reached. Verify TURSO_DATABASE_URL and TURSO_AUTH_TOKEN, then redeploy.");
     } else if (!database.initialized) {
-      nextSteps.push("Run `npm run db:setup` with this deployment's TURSO_DATABASE_URL and TURSO_AUTH_TOKEN to create the ownership tables.");
+      nextSteps.push("The ownership tables could not be created automatically. Verify TURSO_AUTH_TOKEN has write access to this deployment's database and that DATABASE_AUTO_MIGRATE is not set to false, then reload this endpoint; `npm run db:setup` also applies them manually.");
     }
     if (!ownerConfigured) nextSteps.push("Set OWNER_CLERK_USER_ID to enable the owner-only /admin overview.");
 

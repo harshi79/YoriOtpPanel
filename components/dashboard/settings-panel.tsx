@@ -29,7 +29,7 @@ export function SettingsPanel() {
     : !settings.providerConfigured ? "Set NUMBERPANEL_API_KEY as a server-side secret on this deployment, then redeploy."
     : !settings.databaseConfigured ? "Set TURSO_DATABASE_URL and TURSO_AUTH_TOKEN on this deployment, then redeploy."
     : !settings.databaseReachable ? "The Turso database could not be reached. Verify TURSO_DATABASE_URL and TURSO_AUTH_TOKEN, then redeploy."
-    : !settings.tablesInitialized ? "The database is reachable but its tables are missing. Run `npm run db:setup` with this deployment's Turso credentials."
+    : !settings.tablesInitialized ? "The database is reachable but its tables could not be created automatically. Check that TURSO_AUTH_TOKEN has write access to this database, then refresh."
     : null;
 
   return (
@@ -43,7 +43,7 @@ export function SettingsPanel() {
             <StatusRow icon={KeyRound} label="NumberPanel API key" value={settings.providerConfigured ? "Configured on server" : "Not configured"} ok={settings.providerConfigured} />
             <StatusRow icon={LockKeyhole} label="Ownership database" value={settings.databaseConfigured ? "Configured" : "Not configured"} ok={settings.databaseConfigured} />
             <StatusRow icon={Database} label="Database reachable" value={settings.databaseReachable ? "Reachable" : "Unreachable"} ok={settings.databaseReachable} />
-            <StatusRow icon={TableProperties} label="Database tables" value={settings.tablesInitialized ? "Initialized" : "Missing — run db:setup"} ok={settings.tablesInitialized} />
+            <StatusRow icon={TableProperties} label="Database tables" value={settings.tablesInitialized ? "Created automatically" : "Missing — check write access"} ok={settings.tablesInitialized} />
             <StatusRow icon={ShieldCheck} label="Sign-in interface" value={settings.googleOAuthOnlyUi ? "Google OAuth only" : "Check app configuration"} ok={settings.googleOAuthOnlyUi} />
             <StatusRow icon={Check} label="Application owner" value={settings.owner ? "Owner account" : "Standard account"} ok={settings.owner} />
           </div> : <StatusMessage>Connection status is not available.</StatusMessage>}
@@ -59,7 +59,7 @@ export function SettingsPanel() {
           <ol className="space-y-3 text-xs leading-5 text-[#9aada3]">
             <li className="flex gap-2"><span className="font-mono text-[#8bf0c2]">01</span>Set <code className="rounded bg-white/[0.05] px-1 text-[#c5d8cc]">NUMBERPANEL_API_KEY</code> as a deployment secret or in an untracked local <code className="rounded bg-white/[0.05] px-1 text-[#c5d8cc]">.env.local</code>.</li>
             <li className="flex gap-2"><span className="font-mono text-[#8bf0c2]">02</span>Set <code className="rounded bg-white/[0.05] px-1 text-[#c5d8cc]">TURSO_DATABASE_URL</code> and <code className="rounded bg-white/[0.05] px-1 text-[#c5d8cc]">TURSO_AUTH_TOKEN</code> for the durable Turso database used for ownership and throttling.</li>
-            <li className="flex gap-2"><span className="font-mono text-[#8bf0c2]">03</span>Run <code className="rounded bg-white/[0.05] px-1 text-[#c5d8cc]">npm run db:setup</code> during deployment or initial setup.</li>
+            <li className="flex gap-2"><span className="font-mono text-[#8bf0c2]">03</span>Ownership tables are created automatically on first use, so <code className="rounded bg-white/[0.05] px-1 text-[#c5d8cc]">TURSO_AUTH_TOKEN</code> needs write access. <code className="rounded bg-white/[0.05] px-1 text-[#c5d8cc]">npm run db:setup</code> stays available for applying migrations by hand.</li>
           </ol>
         </SectionCard>
         <SectionCard title="Google OAuth" description="Clerk is the only identity provider configured by the application interface.">

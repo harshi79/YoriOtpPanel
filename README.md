@@ -30,13 +30,13 @@ A responsive Next.js dashboard for authorized SMS testing and temporary-inbox wo
 
 4. Set `NUMBERPANEL_API_KEY` to the NumberPanel key. It must be server-side only; do not add a `NEXT_PUBLIC_` prefix.
 
-5. Set `TURSO_DATABASE_URL` and `TURSO_AUTH_TOKEN` for a durable Turso database, then initialize the ownership and rate-limit tables:
+5. Set `TURSO_DATABASE_URL` and `TURSO_AUTH_TOKEN` for a durable Turso database. **The ownership and rate-limit tables are created automatically** the first time the app touches the database (or when `/api/health` is requested), so no manual migration step is needed:
 
    ```bash
-   npm run db:setup
+   npm run db:setup  # optional: applies the same migrations by hand
    ```
 
-   The setup command loads `.env.local` using Next.js environment loading. Exported shell variables take precedence. For local-only development, set `TURSO_DATABASE_URL=file:local.db` and leave the token empty; local database files are ignored by Git. Never use an ephemeral local file for a hosted multi-instance deployment. Hosted deployments must use the remote Turso database, not an embedded replica, so ownership and rate-limit writes share one durable authority.
+   The setup command loads `.env.local` using Next.js environment loading. Exported shell variables take precedence. Automatic and manual migration share drizzle's `__drizzle_migrations` journal, so running `db:setup` before or after the app starts is always a safe no-op. Set `DATABASE_AUTO_MIGRATE=false` if you want migrations applied exclusively by hand. For local-only development, set `TURSO_DATABASE_URL=file:local.db` and leave the token empty; local database files are ignored by Git. Never use an ephemeral local file for a hosted multi-instance deployment. Hosted deployments must use the remote Turso database, not an embedded replica, so ownership and rate-limit writes share one durable authority.
 
 6. Sign in once with Google, copy the resulting Clerk `user_...` ID from Clerk Dashboard → Users, and set it as `OWNER_CLERK_USER_ID`. This controls the owner-only `/admin` route and is evaluated on the server.
 
@@ -73,7 +73,8 @@ The application uses environment variable values from `.env.example`; no Google 
 | `NUMBERPANEL_API_KEY` | Yes | Single shared provider key; server-only secret |
 | `NUMBERPANEL_API_BASE_URL` | Optional | Defaults to `https://numberpanel.tech`; the server rejects other hosts |
 | `TURSO_DATABASE_URL` | Yes | Server-only Turso URL (`libsql://…`); local development may use `file:local.db` |
-| `TURSO_AUTH_TOKEN` | Yes for hosted Turso | Server-only Turso auth token; optional for local `file:` databases |
+| `TURSO_AUTH_TOKEN` | Yes for hosted Turso | Server-only Turso auth token; optional for local `file:` databases. It must have write access so the app can create its own tables |
+| `DATABASE_AUTO_MIGRATE` | Optional | Defaults to enabled; set to `false` to apply migrations only with `npm run db:setup` |
 | `OWNER_CLERK_USER_ID` | Yes for owner tools | Server-side Clerk user ID allowed to open `/admin` |
 
 `.env.example` contains placeholder values only. Use the host's secret manager for deployed environments.
@@ -123,8 +124,10 @@ npm run lint      # ESLint
 npm run typecheck # TypeScript check
 npm test          # Provider normalization plus local libSQL ownership/schema/rate-limit/import tests
 npm run build     # Production build
-npm run db:setup  # Apply versioned Turso migrations (also reads .env.local)
-npm run db:generate # Generate a migration after changing db/schema.ts
+npm run db:setup  # Optional: apply versioned Turso migrations by hand (also reads .env.local)
+npm run db:generate # Generate a migration after changing db/schema.ts (also refreshes db/embedded-migrations.ts)
+npm run db:embed  # Regenerate db/embedded-migrations.ts, the copy the app applies at runtime
+npm run db:embed:check # Fail if db/embedded-migrations.ts is out of date
 npm run db:check  # Check migration metadata
 npm run db:import -- /secure/path/ledger.json # One-time existing-ledger import
 npm start         # Start the production server
@@ -134,7 +137,9 @@ Database tests apply the committed migrations against temporary local libSQL fil
 
 ## Database schema and existing-data cutover
 
-`db/schema.ts` defines all five ledger tables. Versioned SQL and Drizzle snapshots live in `db/migrations`; `db:setup` applies pending migrations, records them in `__drizzle_migrations`, and is safe to rerun. Review generated SQL before deploying it; do not edit already-applied migrations or run schema-push commands on production.
+`db/schema.ts` defines all five ledger tables. Versioned SQL and Drizzle snapshots live in `db/migrations`, and `db/embedded-migrations.ts` is the generated copy the running app applies (a serverless deployment cannot read the migration folder from disk). The app applies pending migrations **automatically**: once per server instance before its first database operation, and whenever `/api/health` or Dashboard → Settings probes readiness. It records them in the same `__drizzle_migrations` journal as `db:setup`, so automatic and manual migration are both safe to rerun in any order and never conflict. After `npm run db:generate`, run `npm run db:embed`; `npm test` and `npm run db:embed:check` fail when the embedded copy drifts from `db/migrations`. Review generated SQL before deploying it; do not edit already-applied migrations or run schema-push commands on production.
+
+- Automatic migration only needs the credentials the app already has, but `TURSO_AUTH_TOKEN` must allow writes. If tables still cannot be created, provider endpoints fail closed with `503 database_not_initialized` and `/api/health` reports `tablesInitialized: false` with the reason in `nextSteps`; `npm run db:setup` applies them by hand, and `DATABASE_AUTO_MIGRATE=false` turns the automatic path off entirely.
 
 - UUIDs remain strings and existing IDs are retained. Database defaults generate UUID v4 values for new sessions/mailboxes; UUID lookups remain case-insensitive by canonicalizing route IDs.
 - All former timestamp columns are stored as UTC Unix **milliseconds** and mapped to JavaScript `Date` by Drizzle. Existing sub-millisecond timestamp precision rounds to the millisecond precision already used by the application/API.
@@ -170,18 +175,18 @@ Source export execution and live hosted Turso verification require operator acce
 
 ## Deployment
 
-Deploy as a Node.js Next.js application (not static export). Provide Node 22, a durable Turso database, all required Clerk/provider/owner secrets, and run `npm run db:setup` once per database before serving traffic. Then build and start with `npm run build` and `npm start`, or use a Next.js-compatible managed platform. Set Clerk's production origin and Google OAuth connection in Clerk Dashboard. Keep `.env.local` untracked for local development and use deployment secret storage in production.
+Deploy as a Node.js Next.js application (not static export). Provide Node 22, a durable Turso database, and all required Clerk/provider/owner secrets. The deployment creates its own ownership tables on first use — no pre-deploy migration step is required (`npm run db:setup` remains available for manual control). Then build and start with `npm run build` and `npm start`, or use a Next.js-compatible managed platform. Set Clerk's production origin and Google OAuth connection in Clerk Dashboard. Keep `.env.local` untracked for local development and use deployment secret storage in production.
 
 ### Vercel checklist (read this if the dashboard loads but numbers/mail show errors)
 
-Sign-in and page shells work without backend secrets, so a successful deploy with failing `/api/provider/*` calls almost always means the deployment's own secrets or database tables are missing — not a code problem. Every provider API call runs through the Turso ownership database first, so one missing step breaks numbers, mail, history, and sessions together.
+Sign-in and page shells work without backend secrets, so a successful deploy with failing `/api/provider/*` calls almost always means the deployment's own secrets are missing or its database credentials cannot write — not a code problem. Every provider API call runs through the Turso ownership database first, so one missing step breaks numbers, mail, history, and sessions together.
 
 1. In Vercel Dashboard → Project → Settings → Environment Variables, set for the **Production** environment: `NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY`, `CLERK_SECRET_KEY` (use **production** Clerk keys — development keys log a telemetry warning and keep Google OAuth in dev mode), `NUMBERPANEL_API_KEY`, `TURSO_DATABASE_URL`, `TURSO_AUTH_TOKEN`, and `OWNER_CLERK_USER_ID`. Redeploy after changing them.
-2. Create the ownership tables in the **same Turso database** the deployment points to. From your machine with the production values exported (never commit them):
+2. Confirm `TURSO_AUTH_TOKEN` has **write** access to the same Turso database the deployment points to. The app creates the ownership tables by itself on the first database request — opening `/api/health` once right after deploying does it immediately. To migrate by hand instead (or when `DATABASE_AUTO_MIGRATE=false`), run this from your machine with the production values exported (never commit them):
    ```bash
    TURSO_DATABASE_URL='libsql://…' TURSO_AUTH_TOKEN='…' npm run db:setup
    ```
-   `db:setup` is safe to rerun. Skipping this step is the most common cause of `503 database_not_initialized` on every provider endpoint.
+   Both paths share one `__drizzle_migrations` journal, so `db:setup` is safe to rerun before or after the app initialized the database. A read-only token or a database URL pointing somewhere else is the most common cause of a persistent `503 database_not_initialized` on every provider endpoint.
 3. Open `https://<your-app>.vercel.app/api/health` (no sign-in needed). Every check should be `true` and `status` should be `"ok"`; `nextSteps` names anything still missing.
 4. Sign in and open Dashboard → Settings, which repeats the same checks for the signed-in session.
 5. If errors persist, open Vercel Dashboard → Logs and look for the JSON `{"level":"error",...}` lines: they carry the exact `code` (`database_not_initialized`, `database_unavailable`, `provider_not_configured`, `provider_unauthorized`, …) and the failing reason.

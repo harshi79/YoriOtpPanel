@@ -10,7 +10,9 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "db:setup": "node scripts/setup-db.mjs",
-    "db:generate": "drizzle-kit generate",
+    "db:generate": "drizzle-kit generate && node scripts/embed-migrations.mjs",
+    "db:embed": "node scripts/embed-migrations.mjs",
+    "db:embed:check": "node scripts/embed-migrations.mjs --check",
     "db:check": "drizzle-kit check",
     "db:import": "node scripts/import-ledger.mjs"
   },
