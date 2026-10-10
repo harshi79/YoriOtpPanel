@@ -21,3 +21,12 @@ coverage/
 # test / tool caches
 .turbo/
 .vercel/
+
+# Local libSQL databases and private cutover exports
+*.db
+*.db-*
+*.sqlite
+*.sqlite-*
+*.sqlite3
+*.sqlite3-*
+.db-transfer/

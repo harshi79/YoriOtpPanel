@@ -6,7 +6,7 @@ A responsive Next.js dashboard for authorized SMS testing and temporary-inbox wo
 
 - Node.js 22 (Node 20.9+ is required by Next.js 16; Node 22 is recommended)
 - npm 10+
-- A PostgreSQL database with TLS for hosted deployments
+- A durable Turso (libSQL) database and auth token for hosted deployments
 - A Clerk application with **Google OAuth as the only enabled sign-in strategy**
 - A NumberPanel API key
 
@@ -24,17 +24,19 @@ A responsive Next.js dashboard for authorized SMS testing and temporary-inbox wo
    cp .env.example .env.local
    ```
 
-   Never commit `.env.local`, provider credentials, Clerk secret keys, or a production database URL.
+   Never commit `.env.local`, provider credentials, Clerk secret keys, database auth tokens, or a production database URL.
 
 3. Configure Clerk (see **Google OAuth-only setup** below), then set the Clerk keys in `.env.local`.
 
 4. Set `NUMBERPANEL_API_KEY` to the NumberPanel key. It must be server-side only; do not add a `NEXT_PUBLIC_` prefix.
 
-5. Set `DATABASE_URL` to a durable PostgreSQL database, then initialize the ownership and rate-limit tables:
+5. Set `TURSO_DATABASE_URL` and `TURSO_AUTH_TOKEN` for a durable Turso database, then initialize the ownership and rate-limit tables:
 
    ```bash
    npm run db:setup
    ```
+
+   The setup command loads `.env.local` using Next.js environment loading. Exported shell variables take precedence. For local-only development, set `TURSO_DATABASE_URL=file:local.db` and leave the token empty; local database files are ignored by Git. Never use an ephemeral local file for a hosted multi-instance deployment. Hosted deployments must use the remote Turso database, not an embedded replica, so ownership and rate-limit writes share one durable authority.
 
 6. Sign in once with Google, copy the resulting Clerk `user_...` ID from Clerk Dashboard → Users, and set it as `OWNER_CLERK_USER_ID`. This controls the owner-only `/admin` route and is evaluated on the server.
 
@@ -44,7 +46,7 @@ A responsive Next.js dashboard for authorized SMS testing and temporary-inbox wo
    npm run dev
    ```
 
-The marketing home and sign-in setup notice render without secrets. Dashboard and API actions fail closed until Clerk, PostgreSQL, and the provider key are configured.
+The marketing home and sign-in setup notice render without secrets. Dashboard and API actions fail closed until Clerk, Turso, and the provider key are configured.
 
 ## Google OAuth-only setup in Clerk
 
@@ -70,14 +72,15 @@ The application uses environment variable values from `.env.example`; no Google 
 | `NEXT_PUBLIC_CLERK_AFTER_SIGN_IN_URL` | Optional | Suggested post-sign-in destination (`/dashboard`) |
 | `NUMBERPANEL_API_KEY` | Yes | Single shared provider key; server-only secret |
 | `NUMBERPANEL_API_BASE_URL` | Optional | Defaults to `https://numberpanel.tech`; the server rejects other hosts |
-| `DATABASE_URL` | Yes | Durable PostgreSQL connection for resource ownership and request throttling |
+| `TURSO_DATABASE_URL` | Yes | Server-only Turso URL (`libsql://…`); local development may use `file:local.db` |
+| `TURSO_AUTH_TOKEN` | Yes for hosted Turso | Server-only Turso auth token; optional for local `file:` databases |
 | `OWNER_CLERK_USER_ID` | Yes for owner tools | Server-side Clerk user ID allowed to open `/admin` |
 
 `.env.example` contains placeholder values only. Use the host's secret manager for deployed environments.
 
 ## Data isolation and shared-provider limitation
 
-NumberPanel's documented `my_numbers`, `my_otps`, and mail-history routes are scoped to a **provider API key/account**, not to a Clerk user. This app therefore maintains an ownership ledger in PostgreSQL:
+NumberPanel's documented `my_numbers`, `my_otps`, and mail-history routes are scoped to a **provider API key/account**, not to a Clerk user. This app therefore maintains an ownership ledger in Turso:
 
 - A number allocation is linked to the authenticated Clerk user before it is returned to the browser. Active phone-number leases are globally unique in YoriOTP.
 - OTP polling and release use an internal YoriOTP session UUID, then verify ownership server-side. Before polling/release, the server re-checks `my_numbers` and compares its provider assignment timestamp with the local lease (five-second tolerance). A missing timestamp fails closed; a changed assignment closes the old local lease without releasing or returning a new renter's data.
@@ -98,7 +101,7 @@ The mail API response schemas are not documented. The integration accepts recogn
 
 ## Built-in request throttles
 
-The app applies PostgreSQL-backed fixed-window limits per authenticated Clerk user and action. They are **short-window abuse controls, not daily quotas**:
+The app applies Turso-backed fixed-window limits per authenticated Clerk user and action. They are **short-window abuse controls, not daily quotas**:
 
 - Inventory: 60/minute
 - Number request: 8/minute
@@ -118,14 +121,53 @@ NumberPanel documents a 1,000/minute number-request limit, no enforced OTP-poll 
 npm run dev       # Local development server
 npm run lint      # ESLint
 npm run typecheck # TypeScript check
-npm test          # Provider normalization / lease-window tests
+npm test          # Provider normalization plus local libSQL ownership/schema/rate-limit/import tests
 npm run build     # Production build
-npm run db:setup  # Create PostgreSQL tables and indexes
+npm run db:setup  # Apply versioned Turso migrations (also reads .env.local)
+npm run db:generate # Generate a migration after changing db/schema.ts
+npm run db:check  # Check migration metadata
+npm run db:import -- /secure/path/ledger.json # One-time existing-ledger import
 npm start         # Start the production server
 ```
 
-No authenticated provider integration test can run without credentials and a provisioned PostgreSQL database. Unit tests use the published API examples and do not provide fake runtime inventory.
+Database tests apply the committed migrations against temporary local libSQL files using the same client and ORM as production. Provider unit tests use the published API examples and do not provide fake runtime inventory. Local libSQL verification is not live Turso testing: hosted authentication, connectivity and authenticated Clerk/NumberPanel end-to-end flows require real credentials.
+
+## Database schema and existing-data cutover
+
+`db/schema.ts` defines all five ledger tables. Versioned SQL and Drizzle snapshots live in `db/migrations`; `db:setup` applies pending migrations, records them in `__drizzle_migrations`, and is safe to rerun. Review generated SQL before deploying it; do not edit already-applied migrations or run schema-push commands on production.
+
+- UUIDs remain strings and existing IDs are retained. Database defaults generate UUID v4 values for new sessions/mailboxes; UUID lookups remain case-insensitive by canonicalizing route IDs.
+- All former timestamp columns are stored as UTC Unix **milliseconds** and mapped to JavaScript `Date` by Drizzle. Existing sub-millisecond timestamp precision rounds to the millisecond precision already used by the application/API.
+- Primary keys, nullable fields, unique lease/mailbox relationships, both cascading foreign keys, the nonnegative rate-count check, and all five named indexes (including descending creation order) are preserved.
+- Ownership changes use libSQL write transactions; uniqueness conflicts retain the existing `409` responses. Rate limiting uses one atomic database-clock upsert with unchanged windows, limits and `Retry-After` behavior.
+
+For an **existing PostgreSQL deployment**, creating empty Turso tables is not a data migration. Do not switch the application until the ownership ledger is transferred and verified:
+
+1. Back up the source database. Stop all old/new application instances and other writers; keep traffic stopped throughout export/import. Preserve the source backup for rollback.
+2. Use the source host's `psql` client (outside application dependencies), with credentials supplied through its secure service/password configuration rather than committed files or command-line URLs. `db/export-ledger.sql` is the only retained source-dialect SQL and exists solely for this one-time cutover. It exports all five tables in a read-only repeatable-read snapshot, preserving IDs, nulls, ownership, history, rate buckets and counts, and converts timestamps to UTC milliseconds:
+
+   ```bash
+   umask 077
+   mkdir -p .db-transfer
+   psql -X -q -A -t -v ON_ERROR_STOP=1 -f db/export-ledger.sql > .db-transfer/ledger.json
+   ```
+
+   The JSON is sensitive ownership data and must stay private/untracked. The export is buffered in memory; plan an operator-reviewed chunked transfer for ledgers too large to fit in memory rather than truncating them.
+
+3. Configure the target's `TURSO_DATABASE_URL` and `TURSO_AUTH_TOKEN` in local/deployment secret storage, then run:
+
+   ```bash
+   npm run db:setup
+   npm run db:import -- .db-transfer/ledger.json
+   ```
+
+   Import requires an empty migrated target, validates the exact columns/types, inserts parents before children, verifies every row and foreign key, and commits all five tables in one transaction. Any mismatch or constraint violation rolls back; it never uses `INSERT OR REPLACE` or overwrites existing owners. Compare the reported per-table counts to the source. Large transfers must fit Turso transaction duration/size limits; do not resume serving on a failed or incomplete import.
+
+4. On a credentialed staging Turso database, verify migrations twice, number/mailbox isolation between two Clerk users, duplicate allocation conflicts, release/expiration/history windows, owner-only aggregate counts, and rate-limit enforcement across instances. Then perform the reviewed production transfer and resume traffic on the Turso-only deployment. Keep all Clerk/Google OAuth, owner and NumberPanel settings unchanged. Remove old deployment connection variables after cutover.
+5. Delete private transfer files when backups are confirmed. If rollback is necessary, stop writers first and reconcile any Turso writes made since cutover before restoring the old deployment; never run both database backends simultaneously.
+
+Source export execution and live hosted Turso verification require operator access and credentials; local tests do not prove those steps succeeded.
 
 ## Deployment
 
-Deploy as a Node.js Next.js application (not static export). Provide Node 22, a durable PostgreSQL database, all required Clerk/provider/owner secrets, and run `npm run db:setup` once per database before serving traffic. Then build and start with `npm run build` and `npm start`, or use a Next.js-compatible managed platform. Set Clerk's production origin and Google OAuth connection in Clerk Dashboard. Keep `.env.local` untracked for local development and use deployment secret storage in production.
+Deploy as a Node.js Next.js application (not static export). Provide Node 22, a durable Turso database, all required Clerk/provider/owner secrets, and run `npm run db:setup` once per database before serving traffic. Then build and start with `npm run build` and `npm start`, or use a Next.js-compatible managed platform. Set Clerk's production origin and Google OAuth connection in Clerk Dashboard. Keep `.env.local` untracked for local development and use deployment secret storage in production.

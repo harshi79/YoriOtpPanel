@@ -1,21 +1,27 @@
-import { readFile } from "node:fs/promises";
-import postgres from "postgres";
+import nextEnv from "@next/env";
+import { createClient } from "@libsql/client";
+import { drizzle } from "drizzle-orm/libsql";
+import { migrate } from "drizzle-orm/libsql/migrator";
+import { fileURLToPath } from "node:url";
 
-const databaseUrl = process.env.DATABASE_URL;
-if (!databaseUrl) {
-  console.error("DATABASE_URL is required to initialize the ownership/rate-limit tables.");
+nextEnv.loadEnvConfig(process.cwd());
+const url = process.env.TURSO_DATABASE_URL;
+if (!url || (!url.startsWith("file:") && !process.env.TURSO_AUTH_TOKEN)) {
+  console.error("TURSO_DATABASE_URL and TURSO_AUTH_TOKEN are required (the token is optional for file: databases).");
   process.exit(1);
 }
 
-const sql = postgres(databaseUrl, { max: 1, connect_timeout: 10, prepare: false });
+let client;
 try {
-  const schema = await readFile(new URL("../db/schema.sql", import.meta.url), "utf8");
-  const statements = schema.split(";").map((statement) => statement.trim()).filter(Boolean);
-  for (const statement of statements) await sql.unsafe(statement);
-  console.log("YoriOTP database schema is ready.");
-} catch (error) {
-  console.error("Database schema setup failed.", error instanceof Error ? error.message : "Unknown error");
+  client = createClient({ url, authToken: process.env.TURSO_AUTH_TOKEN });
+  await migrate(drizzle(client), { migrationsFolder: fileURLToPath(new URL("../db/migrations", import.meta.url)) });
+  const result = await client.execute("PRAGMA foreign_keys");
+  if (Number(result.rows[0]?.foreign_keys) !== 1) throw new Error("Foreign keys must be enabled.");
+  console.log("YoriOTP Turso database migrations are applied.");
+} catch {
+  // Driver errors can include connection details; never print credentials.
+  console.error("Database migration failed. Check the Turso configuration and migration state.");
   process.exitCode = 1;
 } finally {
-  await sql.end();
+  client?.close();
 }
