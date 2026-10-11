@@ -1,15 +1,25 @@
 import Link from "next/link";
+import { redirect } from "next/navigation";
 import { ArrowLeft, ShieldCheck } from "lucide-react";
-import { isClerkConfigured } from "@/lib/auth";
+import { currentClerkUserId, isClerkConfigured } from "@/lib/auth";
 import { GoogleSignInButton } from "@/components/auth/google-sign-in-button";
 import { Logo } from "@/components/logo";
 
 export const metadata = { title: "Sign in" };
 
+// The page reflects the request's session cookie, so it must never be cached
+// or prerendered with a stale signed-out state.
+export const dynamic = "force-dynamic";
+
 type Props = { searchParams: Promise<{ setup?: string }> };
 
 export default async function SignInPage({ searchParams }: Props) {
   const params = await searchParams;
+  // Clerk uses single-session mode here, so a visitor who already holds a
+  // session cannot start another Google sign-in: the API rejects it with
+  // `session_exists` ("You're already signed in.") before Google opens. Send
+  // those visitors to the workspace instead of showing them a failing button.
+  if (await currentClerkUserId()) redirect("/dashboard");
   return <SignInContent setupRequired={!isClerkConfigured() || params.setup === "required"} />;
 }
 

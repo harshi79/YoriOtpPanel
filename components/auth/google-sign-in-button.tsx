@@ -1,41 +1,24 @@
 "use client";
 
 import { useState } from "react";
-import { useSignIn } from "@clerk/nextjs";
+import { useAuth, useSignIn } from "@clerk/nextjs";
 import { Globe2, LoaderCircle } from "lucide-react";
-
-type ClerkErrorDetails = {
-  code?: unknown;
-  longMessage?: unknown;
-  message?: unknown;
-  docsUrl?: unknown;
-};
-
-function describeAuthError(error: unknown): string {
-  if (error && typeof error === "object") {
-    const details = error as ClerkErrorDetails;
-    const message = typeof details.longMessage === "string"
-      ? details.longMessage
-      : typeof details.message === "string"
-        ? details.message
-        : undefined;
-    const code = typeof details.code === "string" ? details.code : undefined;
-
-    if (message || code) {
-      return [message, code ? `Clerk error: ${code}` : undefined]
-        .filter(Boolean)
-        .join(" — ");
-    }
-  }
-
-  if (error instanceof Error && error.message) return error.message;
-  return "Clerk returned an unexpected error. Check the browser console for details.";
-}
+import { AlreadySignedInNotice } from "@/components/auth/already-signed-in-notice";
+import { clerkErrorEntries, describeClerkError, isAlreadySignedInClerkError } from "@/lib/clerk-errors";
 
 export function GoogleSignInButton() {
   const { fetchStatus, signIn } = useSignIn();
+  const { isLoaded, isSignedIn } = useAuth();
   const [error, setError] = useState<string | null>(null);
+  const [sessionExists, setSessionExists] = useState(false);
   const [busy, setBusy] = useState(false);
+
+  // `/sign-in` redirects signed-in visitors on the server; this is the
+  // client-side safety net for a session that becomes visible after that
+  // render (for example after a finished OAuth callback or a back navigation).
+  // Starting `signIn.sso()` in that state can only fail with
+  // `session_exists`, which is what produced "Google sign-in failed".
+  if ((isLoaded && isSignedIn) || sessionExists) return <AlreadySignedInNotice />;
 
   async function continueWithGoogle() {
     if (fetchStatus === "fetching" || busy || !signIn) return;
@@ -56,10 +39,17 @@ export function GoogleSignInButton() {
           code: result.error.code,
           message: result.error.message,
           longMessage: result.error.longMessage,
+          errors: clerkErrorEntries(result.error),
           docsUrl: result.error.docsUrl,
           origin: window.location.origin,
         });
-        setError(`Google sign-in failed: ${describeAuthError(result.error)}`);
+        if (isAlreadySignedInClerkError(result.error)) {
+          // Clerk already holds a session for this browser; offer the paths
+          // that work (dashboard or sign out) instead of a dead-end error.
+          setSessionExists(true);
+          return;
+        }
+        setError(`Google sign-in failed: ${describeClerkError(result.error)}`);
         setBusy(false);
       }
     } catch (caught) {
@@ -67,14 +57,18 @@ export function GoogleSignInButton() {
         error: caught,
         origin: window.location.origin,
       });
-      setError(`Could not start Google sign-in: ${describeAuthError(caught)}`);
+      if (isAlreadySignedInClerkError(caught)) {
+        setSessionExists(true);
+        return;
+      }
+      setError(`Could not start Google sign-in: ${describeClerkError(caught)}`);
       setBusy(false);
     }
   }
 
   return (
     <div className="w-full">
-      <button className="btn-primary w-full" type="button" onClick={continueWithGoogle} disabled={fetchStatus === "fetching" || busy || !signIn}>
+      <button className="btn-primary w-full" type="button" onClick={continueWithGoogle} disabled={!isLoaded || fetchStatus === "fetching" || busy || !signIn}>
         {busy ? <LoaderCircle className="animate-spin" size={17} /> : <Globe2 size={17} />}
         Continue with Google
       </button>

@@ -59,6 +59,15 @@ The application starts Clerk's `oauth_google` strategy directly and offers no em
 5. Set `NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY` and `CLERK_SECRET_KEY`. `NEXT_PUBLIC_CLERK_SIGN_UP_URL=/sign-in` keeps account creation on the same Google-only flow.
 6. Add the hosted app's origin in Clerk's allowed origins/redirect configuration as directed by the Clerk Dashboard.
 
+### Returning to `/sign-in` with an active session
+
+Clerk runs in its default single-session mode here, so a visitor who already holds a session cannot start another Google sign-in: the Frontend API rejects it before Google opens with `session_exists` / `identifier_already_signed_in`. The panel surfaces those nested codes (the thrown `ClerkAPIResponseError` itself only says `api_response_error`) and keeps the flow usable:
+
+- `/sign-in` and `/sso-callback` read the session server-side and redirect signed-in visitors to `/dashboard`, so the Google button is never offered to someone who is already authenticated.
+- If a session becomes visible only after the page rendered (a finished callback, a back navigation, a restored tab), the client replaces the button with a continue/sign-out panel instead of failing.
+- The marketing header shows signed-in visitors a **Dashboard** action instead of a second sign-in.
+- `/sso-callback` opened with no pending attempt (for example after a reload) offers a link back to `/sign-in` rather than spinning forever.
+
 The application uses environment variable values from `.env.example`; no Google client secret belongs in this repository. Google OAuth credentials, when using a custom connection, are configured in Clerk rather than shipped to browser code.
 
 ## Environment variables
@@ -181,7 +190,7 @@ Deploy as a Node.js Next.js application (not static export). Provide Node 22, a 
 
 Sign-in and page shells work without backend secrets, so a successful deploy with failing `/api/provider/*` calls almost always means the deployment's own secrets are missing or its database credentials cannot write — not a code problem. Every provider API call runs through the Turso ownership database first, so one missing step breaks numbers, mail, history, and sessions together.
 
-1. In Vercel Dashboard → Project → Settings → Environment Variables, set for the **Production** environment: `NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY`, `CLERK_SECRET_KEY` (use **production** Clerk keys — development keys log a telemetry warning and keep Google OAuth in dev mode), `NUMBERPANEL_API_KEY`, `TURSO_DATABASE_URL`, `TURSO_AUTH_TOKEN`, and `OWNER_CLERK_USER_ID`. Redeploy after changing them.
+1. In Vercel Dashboard → Project → Settings → Environment Variables, set for the **Production** environment: `NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY`, `CLERK_SECRET_KEY` (use **production** Clerk keys — development keys log `Attention: Clerk collects telemetry data from its SDKs…` on the production domain, keep Google OAuth in dev mode, and share one dev browser, which is the usual cause of repeated sign-in handshakes and stale sessions in production), `NUMBERPANEL_API_KEY`, `TURSO_DATABASE_URL`, `TURSO_AUTH_TOKEN`, and `OWNER_CLERK_USER_ID`. Redeploy after changing them.
 2. Confirm `TURSO_AUTH_TOKEN` has **write** access to the same Turso database the deployment points to. The app creates the ownership tables by itself as soon as the deployment starts, and before its first database request if startup could not — opening `/api/health` once after deploying confirms it. To migrate by hand instead (or when `DATABASE_AUTO_MIGRATE=false`), run this from your machine with the production values exported (never commit them):
    ```bash
    TURSO_DATABASE_URL='libsql://…' TURSO_AUTH_TOKEN='…' npm run db:setup
