@@ -10,6 +10,22 @@ export function isOwnerId(userId: string | null | undefined, ownerId: string | u
   return Boolean(userId && ownerId && userId === ownerId);
 }
 
+/**
+ * Best-effort Clerk user id for public pages that only redirect visitors who
+ * already have a session (for example `/sign-in`). Returns null instead of
+ * throwing when Clerk is unconfigured or no request context is available, so
+ * rendering those pages can never fail because of an auth lookup.
+ */
+export async function currentClerkUserId(): Promise<string | null> {
+  if (!isClerkConfigured()) return null;
+  try {
+    const session = await auth();
+    return session.userId ?? null;
+  } catch {
+    return null;
+  }
+}
+
 export async function requireUserId(): Promise<string> {
   if (!isClerkConfigured()) {
     throw new AppError(503, "auth_not_configured", "Google sign-in is not configured for this deployment.");
